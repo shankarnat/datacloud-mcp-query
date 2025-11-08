@@ -298,8 +298,9 @@ def index():
                 <p>Model Context Protocol (MCP) Server-Sent Events endpoint for ChatGPT</p>
                 {% if authenticated %}
                     <p style="color: #155724;">✓ You are authenticated! You can use this endpoint in ChatGPT.</p>
-                    <p><strong>Add to ChatGPT MCP connector:</strong></p>
-                    <pre><code>https://{{ request.host }}/mcp/sse</code></pre>
+                    <p><strong>Get your MCP URL with authentication token:</strong></p>
+                    <a href="/api/get_mcp_token" class="button" target="_blank">📋 Get MCP Token for ChatGPT</a>
+                    <p style="margin-top: 10px; font-size: 14px;">Click the button above to get your personalized MCP URL with authentication token</p>
                 {% else %}
                     <p style="color: #721c24;">⚠ You must login first before using the MCP endpoint.</p>
                 {% endif %}
@@ -649,18 +650,70 @@ def debug_clear_all_tokens():
     })
 
 
+@app.route("/api/get_mcp_token")
+def get_mcp_token():
+    """
+    Get MCP authentication token for ChatGPT integration
+
+    This endpoint returns your user_id which can be used as a token
+    in the MCP SSE endpoint URL for ChatGPT.
+    """
+    user_id = session.get("user_id")
+    if not user_id or user_id not in token_store:
+        return jsonify({
+            "error": "Not authenticated",
+            "message": "Please login first at /oauth/login"
+        }), 401
+
+    app_url = get_app_url()
+    mcp_url = f"{app_url}/mcp/sse?token={user_id}"
+
+    return jsonify({
+        "token": user_id,
+        "mcp_url": mcp_url,
+        "instructions": [
+            "Copy the mcp_url below",
+            "Go to ChatGPT → Settings → Company Knowledge or MCP Connectors",
+            "Add a new MCP server with this URL",
+            "The token is embedded in the URL and will authenticate your requests"
+        ],
+        "expires": "Token is valid for 2 hours (session lifetime)"
+    })
+
+
 @app.route("/mcp/sse")
 def mcp_sse():
     """
     MCP Server-Sent Events endpoint for ChatGPT MCP connector
 
+    Authentication:
+    - Via session cookie (from web login), OR
+    - Via ?token=<auth_token> query parameter
+
     Usage in ChatGPT:
-    Add this URL: https://your-app-name.herokuapp.com/mcp/sse
+    Add this URL: https://your-app-name.herokuapp.com/mcp/sse?token=<your_token>
     """
-    # Check if user is authenticated
-    user_id = session.get("user_id")
-    if not user_id or user_id not in token_store:
-        return jsonify({"error": "Not authenticated. Please login first at /oauth/login"}), 401
+    # Check authentication - either session or token
+    user_id = None
+
+    # Try session-based auth first
+    session_user_id = session.get("user_id")
+    if session_user_id and session_user_id in token_store:
+        user_id = session_user_id
+        logger.info(f"MCP SSE - authenticated via session: {user_id}")
+    else:
+        # Try token-based auth
+        auth_token = request.args.get("token") or request.headers.get("X-Auth-Token")
+        if auth_token and auth_token in token_store:
+            user_id = auth_token
+            logger.info(f"MCP SSE - authenticated via token: {user_id}")
+
+    if not user_id:
+        logger.error("MCP SSE - authentication failed")
+        return jsonify({
+            "error": "Not authenticated",
+            "message": "Please authenticate first. Get your token from /api/get_mcp_token after logging in."
+        }), 401
 
     logger.info(f"MCP SSE connection requested for user: {user_id}")
 
