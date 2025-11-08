@@ -5,9 +5,7 @@ This allows both synchronous Flask routes and asynchronous MCP SSE to coexist.
 
 import os
 import logging
-from werkzeug.middleware.dispatcher import DispatcherMiddleware
-from werkzeug.wrappers import Response as WerkzeugResponse
-from a2wsgi import ASGIMiddleware
+from a2wsgi import WSGIMiddleware
 
 # Import the Flask app
 from web_server import app as flask_app, token_store, oauth_config
@@ -178,7 +176,7 @@ async def mcp_sse_endpoint(request: Request, token: str = None):
 
 
 # Convert Flask app to ASGI
-flask_asgi_app = ASGIMiddleware(flask_app)
+flask_asgi_app = WSGIMiddleware(flask_app)
 
 # Create the combined ASGI application
 async def application(scope, receive, send):
