@@ -14,12 +14,21 @@ logger = logging.getLogger(__name__)
 # Create an MCP server
 mcp = FastMCP("Salesforce Data Cloud MCP Server")
 
-# Global config and session
-sf_org: OAuthConfig = OAuthConfig.from_env()
-oauth_session: OAuthSession = OAuthSession(sf_org)
+# Global config and session - initialized lazily to avoid startup crashes
+sf_org: OAuthConfig = None
+oauth_session: OAuthSession = None
 
 # Non-auth configuration
 DEFAULT_LIST_TABLE_FILTER = os.getenv('DEFAULT_LIST_TABLE_FILTER', '%')
+
+
+def get_oauth_session() -> OAuthSession:
+    """Lazy initialization of OAuth session to avoid startup crashes"""
+    global sf_org, oauth_session
+    if oauth_session is None:
+        sf_org = OAuthConfig.from_env()
+        oauth_session = OAuthSession(sf_org)
+    return oauth_session
 
 
 # Add a custom route for health check / info
@@ -35,13 +44,13 @@ def query(
         description="A SQL query in the PostgreSQL dialect make sure to always quote all identifies and use the exact casing. To formulate the query first verify which tables and fields to use through the suggest fields tool (or if it is broken through the list tables / describe tables call). Before executing the tool provide the user a succinct summary (targeted to low code users) on the semantics of the query"),
 ):
     # Returns both data and metadata
-    return run_query(oauth_session, sql)
+    return run_query(get_oauth_session(), sql)
 
 
 @mcp.tool(description="Lists the available tables in the database")
 def list_tables() -> list[str]:
     sql = "SELECT c.relname AS TABLE_NAME FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_description d ON (c.oid = d.objoid AND d.objsubid = 0  and d.classoid = 'pg_class'::regclass) WHERE c.relnamespace = n.oid AND c.relname LIKE '%s'" % DEFAULT_LIST_TABLE_FILTER
-    result = run_query(oauth_session, sql)
+    result = run_query(get_oauth_session(), sql)
     # Extract data from the result dictionary
     data = result.get("data", [])
     return [x[0] for x in data]
@@ -52,7 +61,7 @@ def describe_table(
     table: str = Field(description="The table name"),
 ) -> list[str]:
     sql = f"SELECT a.attname FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid) JOIN pg_catalog.pg_attribute a ON (a.attrelid = c.oid) JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid) LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid = def.adrelid AND a.attnum = def.adnum) LEFT JOIN pg_catalog.pg_description dsc ON (c.oid = dsc.objoid AND a.attnum = dsc.objsubid) LEFT JOIN pg_catalog.pg_class dc ON (dc.oid = dsc.classoid AND dc.relname = 'pg_class') LEFT JOIN pg_catalog.pg_namespace dn ON (dc.relnamespace = dn.oid AND dn.nspname = 'pg_catalog') WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relname='{table}'"
-    result = run_query(oauth_session, sql)
+    result = run_query(get_oauth_session(), sql)
     # Extract data from the result dictionary
     data = result.get("data", [])
     return [x[0] for x in data]
