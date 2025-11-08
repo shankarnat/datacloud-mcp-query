@@ -382,7 +382,7 @@ async def handle_mcp_sse_auth(scope, receive, send):
             if user_id in sse_connections:
                 del sse_connections[user_id]
 
-    # Send SSE response
+    # Send SSE response with proper headers
     await send({
         "type": "http.response.start",
         "status": 200,
@@ -390,14 +390,27 @@ async def handle_mcp_sse_auth(scope, receive, send):
             [b"content-type", b"text/event-stream"],
             [b"cache-control", b"no-cache"],
             [b"connection", b"keep-alive"],
+            [b"x-accel-buffering", b"no"],  # Disable buffering in nginx/proxies
+            [b"access-control-allow-origin", b"*"],  # CORS for ChatGPT
         ],
     })
 
-    async for event in event_generator():
+    # Send events
+    try:
+        async for event in event_generator():
+            await send({
+                "type": "http.response.body",
+                "body": event.encode("utf-8"),
+                "more_body": True,
+            })
+    except asyncio.CancelledError:
+        logger.info(f"SSE connection cancelled for user {user_id}")
+    finally:
+        # Send final empty body to close connection gracefully
         await send({
             "type": "http.response.body",
-            "body": event.encode("utf-8"),
-            "more_body": True,
+            "body": b"",
+            "more_body": False,
         })
 
 async def handle_mcp_message(scope, receive, send):
@@ -452,7 +465,10 @@ async def handle_mcp_message(scope, receive, send):
             await send({
                 "type": "http.response.start",
                 "status": 202,
-                "headers": [[b"content-type", b"application/json"]],
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"access-control-allow-origin", b"*"],
+                ],
             })
             await send({
                 "type": "http.response.body",
@@ -463,7 +479,10 @@ async def handle_mcp_message(scope, receive, send):
             await send({
                 "type": "http.response.start",
                 "status": 200,
-                "headers": [[b"content-type", b"application/json"]],
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"access-control-allow-origin", b"*"],
+                ],
             })
             await send({
                 "type": "http.response.body",
@@ -504,11 +523,30 @@ async def application(scope, receive, send):
     path = scope.get("path", "")
     method = scope.get("method", "")
 
+    # Handle CORS preflight for MCP endpoints
+    if method == "OPTIONS" and path in ["/mcp/sse", "/mcp/message"]:
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                [b"access-control-allow-origin", b"*"],
+                [b"access-control-allow-methods", b"GET, POST, OPTIONS"],
+                [b"access-control-allow-headers", b"*"],
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b"",
+        })
+        return
+
     if path == "/mcp/sse":
         # Route to MCP SSE auth handler
+        logger.info(f"Routing to MCP SSE handler: {method} {path}")
         await handle_mcp_sse_auth(scope, receive, send)
     elif path == "/mcp/message" and method == "POST":
         # Route to MCP message handler
+        logger.info(f"Routing to MCP message handler: {method} {path}")
         await handle_mcp_message(scope, receive, send)
     else:
         # Route to Flask for everything else
