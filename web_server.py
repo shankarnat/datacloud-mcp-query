@@ -178,6 +178,12 @@ def index():
     user_id = session.get("user_id")
     is_authenticated = user_id and user_id in token_store
 
+    # Debug logging
+    logger.info(f"Index page - user_id from session: {user_id}")
+    logger.info(f"Index page - user in token_store: {user_id in token_store if user_id else False}")
+    logger.info(f"Index page - is_authenticated: {is_authenticated}")
+    logger.info(f"Index page - token_store keys: {list(token_store.keys())}")
+
     html = """
     <!DOCTYPE html>
     <html>
@@ -598,6 +604,22 @@ def api_describe_table():
 def health():
     """Health check endpoint"""
     return jsonify({"status": "ok"})
+
+
+@app.route("/debug/session")
+def debug_session():
+    """Debug endpoint to check session status"""
+    user_id = session.get("user_id")
+    code_verifier = session.get("code_verifier")
+
+    return jsonify({
+        "session_user_id": user_id,
+        "has_code_verifier": bool(code_verifier),
+        "user_in_token_store": user_id in token_store if user_id else False,
+        "token_store_users": list(token_store.keys()),
+        "session_permanent": session.permanent,
+        "flask_secret_key_set": bool(os.getenv("FLASK_SECRET_KEY")),
+    })
 
 
 @app.route("/mcp/sse")
