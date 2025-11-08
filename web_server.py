@@ -345,14 +345,27 @@ def oauth_login():
     # Mark session as permanent to persist across redirects
     session.permanent = True
 
+    # Check if already authenticated
+    existing_user_id = session.get("user_id")
+    if existing_user_id and existing_user_id in token_store:
+        logger.info(f"User {existing_user_id} already authenticated, redirecting to home")
+        return redirect("/")
+
     # Generate PKCE pair
     code_verifier, code_challenge = generate_pkce_pair()
 
+    # Reuse existing user_id if present, otherwise create new one
+    if "user_id" not in session:
+        session["user_id"] = secrets.token_hex(16)
+        logger.info(f"Created NEW session for user_id: {session['user_id']}")
+    else:
+        # Clear any old token for this user_id before restarting login
+        if session["user_id"] in token_store:
+            del token_store[session["user_id"]]
+        logger.info(f"Reusing session for user_id: {session['user_id']}, cleared old token")
+
     # Store code verifier in session
     session["code_verifier"] = code_verifier
-    session["user_id"] = secrets.token_hex(16)
-
-    logger.info(f"Created session for user_id: {session['user_id']}")
 
     # Build authorization URL
     app_url = get_app_url()
@@ -619,6 +632,20 @@ def debug_session():
         "token_store_users": list(token_store.keys()),
         "session_permanent": session.permanent,
         "flask_secret_key_set": bool(os.getenv("FLASK_SECRET_KEY")),
+    })
+
+
+@app.route("/debug/clear_all_tokens")
+def debug_clear_all_tokens():
+    """Debug endpoint to clear all tokens and sessions (use with caution!)"""
+    global token_store
+    old_count = len(token_store)
+    token_store.clear()
+    session.clear()
+    logger.info(f"Cleared all tokens ({old_count} entries) and current session")
+    return jsonify({
+        "message": f"Cleared {old_count} tokens and current session",
+        "token_store_now_empty": len(token_store) == 0,
     })
 
 
