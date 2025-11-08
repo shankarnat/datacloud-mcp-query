@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 # Create an MCP server
-mcp = FastMCP("Demo")
+mcp = FastMCP("Salesforce Data Cloud MCP Server")
 
 # Global config and session
 sf_org: OAuthConfig = OAuthConfig.from_env()
@@ -20,6 +20,38 @@ oauth_session: OAuthSession = OAuthSession(sf_org)
 
 # Non-auth configuration
 DEFAULT_LIST_TABLE_FILTER = os.getenv('DEFAULT_LIST_TABLE_FILTER', '%')
+
+
+# Add a custom route for health check / info
+@mcp.custom_route("/", methods=["GET"])
+async def root():
+    """Root endpoint that returns server info"""
+    from starlette.responses import JSONResponse
+    return JSONResponse({
+        "name": "Salesforce Data Cloud MCP Server",
+        "version": "1.0.0",
+        "status": "running",
+        "protocol": "MCP (Model Context Protocol)",
+        "transport": "streamable-http",
+        "description": "MCP server for querying Salesforce Data Cloud",
+        "endpoints": {
+            "info": "GET /",
+            "health": "GET /health",
+            "mcp": "POST / (MCP protocol endpoint)"
+        },
+        "tools": [
+            "query - Execute SQL queries against Data Cloud",
+            "list_tables - List available tables",
+            "describe_table - Get table column information"
+        ]
+    })
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check():
+    """Health check endpoint for monitoring"""
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "healthy"})
 
 
 @mcp.tool(description="Executes a SQL query and returns the results")
