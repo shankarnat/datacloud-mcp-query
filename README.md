@@ -9,7 +9,23 @@ This MCP server provides a seamless integration between Cursor and Salesforce Da
 - Describe table columns and structure
 - Automatic OAuth2 authentication flow with Salesforce
 
-## Adding to Cursor
+## Deployment Options
+
+### Option 1: Heroku Deployment for ChatGPT Enterprise Knowledge
+
+Deploy this MCP server to Heroku and use it with ChatGPT Enterprise, Edu, or Business accounts.
+
+**📖 See [HEROKU_DEPLOYMENT.md](HEROKU_DEPLOYMENT.md) for complete deployment guide**
+
+Quick overview:
+1. Get a Salesforce refresh token using `python get_refresh_token.py`
+2. Deploy to Heroku with `git push heroku main`
+3. Configure as a custom connector in ChatGPT Enterprise
+4. Query your Salesforce Data Cloud directly from ChatGPT!
+
+### Option 2: Local Development with Cursor/Claude Desktop
+
+Use the MCP server locally with Cursor IDE or Claude Desktop:
 
 1. Clone this repository to your local machine
 2. Install the required dependencies:

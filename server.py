@@ -60,4 +60,19 @@ if __name__ == "__main__":
     )
 
     logger.info("Starting MCP server")
-    mcp.run()
+
+    # Check if we should run in HTTP mode (for Heroku/production) or stdio mode (for local development)
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+
+    if transport == "http":
+        # Heroku/production mode - use streamable HTTP
+        port = int(os.getenv("PORT", 8000))
+        host = os.getenv("HOST", "0.0.0.0")
+        path = os.getenv("MCP_PATH", "/mcp")
+
+        logger.info(f"Starting MCP server with streamable HTTP on {host}:{port}{path}")
+        mcp.run(transport="streamable-http", host=host, port=port, path=path)
+    else:
+        # Local development mode - use stdio
+        logger.info("Starting MCP server with stdio transport")
+        mcp.run()

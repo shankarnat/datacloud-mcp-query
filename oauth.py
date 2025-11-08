@@ -36,14 +36,20 @@ class OAuthConfig:
         redirect_uri = os.getenv(
             "SF_CALLBACK_URL", "http://localhost:55556/Callback")
 
-        missing = [name for name, val in {
-            "SF_CLIENT_ID": client_id,
-            "SF_CLIENT_SECRET": client_secret,
-        }.items() if not val]
-        if missing:
-            print(
-                f"Error: Missing required environment variables: {', '.join(missing)}")
-            sys.exit(1)
+        # Allow refresh token flow without client credentials for production environments
+        refresh_token = os.getenv("SF_REFRESH_TOKEN")
+        if not refresh_token:
+            # If no refresh token, require client credentials for browser-based flow
+            missing = [name for name, val in {
+                "SF_CLIENT_ID": client_id,
+                "SF_CLIENT_SECRET": client_secret,
+            }.items() if not val]
+            if missing:
+                print(
+                    f"Error: Missing required environment variables: {', '.join(missing)}")
+                print("Either provide SF_CLIENT_ID and SF_CLIENT_SECRET for browser-based OAuth,")
+                print("or provide SF_REFRESH_TOKEN for token-based authentication")
+                sys.exit(1)
 
         return cls(client_id=client_id, client_secret=client_secret, login_root=login_root, redirect_uri=redirect_uri)
 
@@ -89,6 +95,33 @@ class OAuthSession:
         self.token: str | None = None
         self.exp: datetime | None = None
         self.instance_url: str | None = None
+        self.refresh_token: str | None = os.getenv("SF_REFRESH_TOKEN")
+
+    def _refresh_access_token(self) -> dict:
+        """Use refresh token to get a new access token"""
+        logger.info("Refreshing access token using refresh token")
+        token_url = f"https://{self.config.login_root}/services/oauth2/token"
+
+        response = requests.post(
+            token_url,
+            {
+                "grant_type": "refresh_token",
+                "client_id": self.config.client_id,
+                "client_secret": self.config.client_secret,
+                "refresh_token": self.refresh_token,
+            },
+            headers={"Accept": "application/json"},
+        )
+
+        logger.info(f"Token refresh response: status={response.status_code}")
+
+        if response.status_code >= 400:
+            logger.error(f"Token refresh failed: {response.text}")
+
+        response.raise_for_status()
+
+        logger.info("Successfully refreshed access token")
+        return response.json()
 
     def _run_oauth_flow(self, scopes: list[str]):
         logger.info(f"Starting OAuth flow with scopes: {scopes}")
@@ -172,8 +205,20 @@ class OAuthSession:
             self.token = None
 
         if self.token is None:
-            auth_info = self._run_oauth_flow(
-                ["api", "cdp_query_api", "cdp_profile_api"])
+            # Check if we have a refresh token (for Heroku/production)
+            if self.refresh_token:
+                logger.info("Using refresh token for authentication")
+                auth_info = self._refresh_access_token()
+            else:
+                # Fall back to browser-based OAuth flow (for local development)
+                logger.info("Using browser-based OAuth flow")
+                auth_info = self._run_oauth_flow(
+                    ["api", "cdp_query_api", "cdp_profile_api"])
+                # Store the refresh token for future use
+                if "refresh_token" in auth_info:
+                    self.refresh_token = auth_info["refresh_token"]
+                    logger.info("Received refresh token - store this in SF_REFRESH_TOKEN env var for production use")
+
             self.token = auth_info["access_token"]
             self.exp = datetime.now() + timedelta(minutes=110)
             self.instance_url = auth_info["instance_url"]
