@@ -14,9 +14,11 @@ import base64
 import hashlib
 import secrets
 
-from flask import Flask, request, redirect, session, jsonify, render_template_string
+from flask import Flask, request, redirect, session, jsonify, render_template_string, Response, stream_with_context
 import requests
 from rfc3986 import builder as uri_builder
+from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 from oauth import OAuthConfig
 from connect_api_dc_sql import run_query
@@ -46,6 +48,13 @@ oauth_config: Optional[OAuthConfig] = None
 # In-memory token storage (for production, use Redis or a database)
 token_store = {}
 
+# Create MCP server instance
+mcp = FastMCP("DataCloud MCP Server")
+
+# Non-auth configuration for MCP tools
+DEFAULT_LIST_TABLE_FILTER = os.getenv('DEFAULT_LIST_TABLE_FILTER', '%')
+
+
 def get_app_url():
     """Get the application URL from environment or request"""
     heroku_app_name = os.getenv("HEROKU_APP_NAME")
@@ -70,6 +79,97 @@ def generate_pkce_pair() -> tuple[str, str]:
     )
 
     return code_verifier, code_challenge
+
+
+# Define MCP tools
+@mcp.tool(description="Executes a SQL query and returns the results")
+def query(
+    sql: str = Field(
+        description="A SQL query in the PostgreSQL dialect. Make sure to always quote all identifiers and use exact casing. To formulate the query, first verify which tables and fields to use through the list_tables or describe_table tools."
+    ),
+):
+    """Execute SQL query against Data Cloud"""
+    # Get current user's token
+    user_id = session.get("user_id")
+    if not user_id or user_id not in token_store:
+        raise Exception("Not authenticated. Please authenticate first.")
+
+    token_info = token_store[user_id]
+
+    # Create simple OAuth session
+    class SimpleOAuthSession:
+        def __init__(self, token, instance_url):
+            self._token = token
+            self._instance_url = instance_url
+
+        def get_token(self):
+            return self._token
+
+        def get_instance_url(self):
+            return self._instance_url
+
+    oauth_session = SimpleOAuthSession(token_info["access_token"], token_info["instance_url"])
+    return run_query(oauth_session, sql)
+
+
+@mcp.tool(description="Lists the available tables in the database")
+def list_tables() -> list[str]:
+    """List all available tables in Data Cloud"""
+    # Get current user's token
+    user_id = session.get("user_id")
+    if not user_id or user_id not in token_store:
+        raise Exception("Not authenticated. Please authenticate first.")
+
+    token_info = token_store[user_id]
+
+    sql = f"SELECT c.relname AS TABLE_NAME FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_description d ON (c.oid = d.objoid AND d.objsubid = 0 and d.classoid = 'pg_class'::regclass) WHERE c.relnamespace = n.oid AND c.relname LIKE '{DEFAULT_LIST_TABLE_FILTER}'"
+
+    class SimpleOAuthSession:
+        def __init__(self, token, instance_url):
+            self._token = token
+            self._instance_url = instance_url
+
+        def get_token(self):
+            return self._token
+
+        def get_instance_url(self):
+            return self._instance_url
+
+    oauth_session = SimpleOAuthSession(token_info["access_token"], token_info["instance_url"])
+    result = run_query(oauth_session, sql)
+    data = result.get("data", [])
+    return [x[0] for x in data]
+
+
+@mcp.tool(description="Describes the columns of a table")
+def describe_table(
+    table: str = Field(description="The table name"),
+) -> list[str]:
+    """Get column information for a specific table"""
+    # Get current user's token
+    user_id = session.get("user_id")
+    if not user_id or user_id not in token_store:
+        raise Exception("Not authenticated. Please authenticate first.")
+
+    token_info = token_store[user_id]
+
+    sql = f"SELECT a.attname FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid) JOIN pg_catalog.pg_attribute a ON (a.attrelid = c.oid) JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid) LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid = def.adrelid AND a.attnum = def.adnum) LEFT JOIN pg_catalog.pg_description dsc ON (c.oid = dsc.objoid AND a.attnum = dsc.objsubid) LEFT JOIN pg_catalog.pg_class dc ON (dc.oid = dsc.classoid AND dc.relname = 'pg_class') LEFT JOIN pg_catalog.pg_namespace dn ON (dc.relnamespace = dn.oid AND dn.nspname = 'pg_catalog') WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relname='{table}'"
+
+    class SimpleOAuthSession:
+        def __init__(self, token, instance_url):
+            self._token = token
+            self._instance_url = instance_url
+
+        def get_token(self):
+            return self._token
+
+        def get_instance_url(self):
+            return self._instance_url
+
+    oauth_session = SimpleOAuthSession(token_info["access_token"], token_info["instance_url"])
+    result = run_query(oauth_session, sql)
+    data = result.get("data", [])
+    return [x[0] for x in data]
 
 
 @app.route("/")
@@ -185,6 +285,26 @@ def index():
 }</code></pre>
             </div>
 
+            <h2>🔌 MCP Integration (ChatGPT)</h2>
+
+            <div class="endpoint">
+                <strong>GET /mcp/sse</strong>
+                <p>Model Context Protocol (MCP) Server-Sent Events endpoint for ChatGPT</p>
+                {% if authenticated %}
+                    <p style="color: #155724;">✓ You are authenticated! You can use this endpoint in ChatGPT.</p>
+                    <p><strong>Add to ChatGPT MCP connector:</strong></p>
+                    <pre><code>https://{{ request.host }}/mcp/sse</code></pre>
+                {% else %}
+                    <p style="color: #721c24;">⚠ You must login first before using the MCP endpoint.</p>
+                {% endif %}
+                <p><strong>Available Tools:</strong></p>
+                <ul>
+                    <li><code>query</code> - Execute SQL queries</li>
+                    <li><code>list_tables</code> - List available tables</li>
+                    <li><code>describe_table</code> - Get table schema</li>
+                </ul>
+            </div>
+
             <h2>🔧 Configuration</h2>
             <p>Required environment variables:</p>
             <ul>
@@ -195,7 +315,11 @@ def index():
             </ul>
 
             <h2>📚 Documentation</h2>
-            <p>This server exposes the Data Cloud MCP tools as REST API endpoints.</p>
+            <p>This server exposes the Data Cloud MCP tools via:</p>
+            <ul>
+                <li><strong>REST API</strong> - For custom integrations</li>
+                <li><strong>MCP SSE</strong> - For ChatGPT and other MCP clients</li>
+            </ul>
             <p>Authenticate via OAuth 2.0 with Salesforce before making API calls.</p>
         </div>
     </body>
@@ -474,6 +598,164 @@ def api_describe_table():
 def health():
     """Health check endpoint"""
     return jsonify({"status": "ok"})
+
+
+@app.route("/mcp/sse")
+def mcp_sse():
+    """
+    MCP Server-Sent Events endpoint for ChatGPT MCP connector
+
+    Usage in ChatGPT:
+    Add this URL: https://your-app-name.herokuapp.com/mcp/sse
+    """
+    # Check if user is authenticated
+    user_id = session.get("user_id")
+    if not user_id or user_id not in token_store:
+        return jsonify({"error": "Not authenticated. Please login first at /oauth/login"}), 401
+
+    logger.info(f"MCP SSE connection requested for user: {user_id}")
+
+    # Import SSE transport from MCP SDK
+    from mcp.server.sse import SseServerTransport
+    from mcp.server import Server
+    import mcp.types as types
+    import asyncio
+    from collections.abc import Sequence
+
+    # Create server instance
+    server = Server("datacloud-mcp")
+
+    # Register list_resources handler
+    @server.list_resources()
+    async def handle_list_resources() -> list[types.Resource]:
+        return []
+
+    # Register list_prompts handler
+    @server.list_prompts()
+    async def handle_list_prompts() -> list[types.Prompt]:
+        return []
+
+    # Register list_tools handler
+    @server.list_tools()
+    async def handle_list_tools() -> list[types.Tool]:
+        return [
+            types.Tool(
+                name="query",
+                description="Executes a SQL query and returns the results",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "sql": {
+                            "type": "string",
+                            "description": "A SQL query in the PostgreSQL dialect. Make sure to always quote all identifiers and use exact casing."
+                        }
+                    },
+                    "required": ["sql"]
+                }
+            ),
+            types.Tool(
+                name="list_tables",
+                description="Lists the available tables in the database",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                }
+            ),
+            types.Tool(
+                name="describe_table",
+                description="Describes the columns of a table",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "table": {
+                            "type": "string",
+                            "description": "The table name"
+                        }
+                    },
+                    "required": ["table"]
+                }
+            ),
+        ]
+
+    # Register call_tool handler
+    @server.call_tool()
+    async def handle_call_tool(
+        name: str, arguments: dict
+    ) -> Sequence[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+        # Get token info from session
+        token_info = token_store.get(user_id)
+        if not token_info:
+            return [types.TextContent(type="text", text="Error: Not authenticated")]
+
+        try:
+            # Create OAuth session
+            class SimpleOAuthSession:
+                def __init__(self, token, instance_url):
+                    self._token = token
+                    self._instance_url = instance_url
+
+                def get_token(self):
+                    return self._token
+
+                def get_instance_url(self):
+                    return self._instance_url
+
+            oauth_session = SimpleOAuthSession(token_info["access_token"], token_info["instance_url"])
+
+            # Execute the requested tool
+            if name == "query":
+                sql = arguments.get("sql")
+                result = run_query(oauth_session, sql)
+                return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+            elif name == "list_tables":
+                sql = f"SELECT c.relname AS TABLE_NAME FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_description d ON (c.oid = d.objoid AND d.objsubid = 0 and d.classoid = 'pg_class'::regclass) WHERE c.relnamespace = n.oid AND c.relname LIKE '{DEFAULT_LIST_TABLE_FILTER}'"
+                result = run_query(oauth_session, sql)
+                data = result.get("data", [])
+                tables = [x[0] for x in data]
+                return [types.TextContent(type="text", text=json.dumps(tables, indent=2))]
+
+            elif name == "describe_table":
+                table = arguments.get("table")
+                sql = f"SELECT a.attname FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid) JOIN pg_catalog.pg_attribute a ON (a.attrelid = c.oid) JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid) LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid = def.adrelid AND a.attnum = def.adnum) LEFT JOIN pg_catalog.pg_description dsc ON (c.oid = dsc.objoid AND a.attnum = dsc.objsubid) LEFT JOIN pg_catalog.pg_class dc ON (dc.oid = dsc.classoid AND dc.relname = 'pg_class') LEFT JOIN pg_catalog.pg_namespace dn ON (dc.relnamespace = dn.oid AND dn.nspname = 'pg_catalog') WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relname='{table}'"
+                result = run_query(oauth_session, sql)
+                data = result.get("data", [])
+                columns = [x[0] for x in data]
+                return [types.TextContent(type="text", text=json.dumps(columns, indent=2))]
+
+            else:
+                return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+
+        except Exception as e:
+            logger.error(f"Error executing tool {name}: {e}")
+            return [types.TextContent(type="text", text=f"Error: {str(e)}")]
+
+    # Create SSE transport
+    async def run_sse():
+        async with SseServerTransport("/messages") as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options()
+            )
+
+    # Run the async server
+    def generate():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(run_sse())
+        finally:
+            loop.close()
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 def init_app():
