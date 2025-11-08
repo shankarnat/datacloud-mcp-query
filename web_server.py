@@ -334,7 +334,7 @@ def index():
 
     from jinja2 import Template
     template = Template(html)
-    return template.render(authenticated=is_authenticated)
+    return template.render(authenticated=is_authenticated, request=request)
 
 
 @app.route("/oauth/login")
