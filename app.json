@@ -1,0 +1,41 @@
+{
+  "name": "Data Cloud MCP Server",
+  "description": "Model Context Protocol server for Salesforce Data Cloud SQL queries",
+  "repository": "https://github.com/forcedotcom/datacloud-mcp-query",
+  "keywords": ["salesforce", "data-cloud", "mcp", "sql", "api"],
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "env": {
+    "SF_CLIENT_ID": {
+      "description": "Salesforce Connected App Client ID",
+      "required": true
+    },
+    "SF_CLIENT_SECRET": {
+      "description": "Salesforce Connected App Client Secret",
+      "required": true
+    },
+    "HEROKU_APP_NAME": {
+      "description": "Your Heroku app name (e.g., my-datacloud-mcp)",
+      "required": false
+    },
+    "SF_LOGIN_URL": {
+      "description": "Salesforce login URL (default: login.salesforce.com, use test.salesforce.com for sandbox)",
+      "value": "login.salesforce.com",
+      "required": false
+    },
+    "DEFAULT_LIST_TABLE_FILTER": {
+      "description": "Filter pattern for listing tables (SQL LIKE syntax)",
+      "value": "%",
+      "required": false
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  }
+}
