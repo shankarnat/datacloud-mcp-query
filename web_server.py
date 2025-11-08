@@ -32,6 +32,14 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(32))
 
+# Configure session for production HTTPS
+app.config.update(
+    SESSION_COOKIE_SECURE=True,  # Only send cookie over HTTPS
+    SESSION_COOKIE_HTTPONLY=True,  # Prevent JavaScript access to session cookie
+    SESSION_COOKIE_SAMESITE='Lax',  # Allow cookie during OAuth redirects
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=2),  # Session expires after 2 hours
+)
+
 # Global OAuth config
 oauth_config: Optional[OAuthConfig] = None
 
@@ -204,12 +212,17 @@ def oauth_login():
     """Initiate OAuth flow"""
     logger.info("Initiating OAuth login flow")
 
+    # Mark session as permanent to persist across redirects
+    session.permanent = True
+
     # Generate PKCE pair
     code_verifier, code_challenge = generate_pkce_pair()
 
     # Store code verifier in session
     session["code_verifier"] = code_verifier
     session["user_id"] = secrets.token_hex(16)
+
+    logger.info(f"Created session for user_id: {session['user_id']}")
 
     # Build authorization URL
     app_url = get_app_url()
@@ -257,8 +270,10 @@ def oauth_callback():
     code_verifier = session.get("code_verifier")
     user_id = session.get("user_id")
 
+    logger.info(f"Callback - user_id in session: {user_id}, has code_verifier: {bool(code_verifier)}")
+
     if not code_verifier:
-        logger.error("No code verifier found in session")
+        logger.error("No code verifier found in session - session may have expired or cookies not set")
         return "<h1>Authentication Error</h1><p>Session expired. Please try again.</p>", 400
 
     # Exchange code for token
