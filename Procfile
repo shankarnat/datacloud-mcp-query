@@ -1,1 +1,1 @@
-web: gunicorn web_server:app --bind 0.0.0.0:$PORT --timeout 120
+web: uvicorn asgi_server:application --host 0.0.0.0 --port $PORT --timeout-keep-alive 120
