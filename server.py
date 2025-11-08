@@ -76,8 +76,9 @@ if __name__ == "__main__":
         # Get the Starlette ASGI app from FastMCP
         http_app = mcp.streamable_http_app()
 
-        # Run with uvicorn
-        uvicorn.run(http_app, host=host, port=port)
+        # Run with uvicorn - explicitly set workers=1 since we're passing app object directly
+        # (Heroku sets WEB_CONCURRENCY which causes issues with app objects)
+        uvicorn.run(http_app, host=host, port=port, workers=1)
     else:
         # Local development mode - use stdio
         logger.info("Starting MCP server with stdio transport")
