@@ -73,8 +73,8 @@ if __name__ == "__main__":
 
         logger.info(f"Starting MCP server with streamable HTTP on {host}:{port}")
 
-        # Create the ASGI app from FastMCP
-        http_app = mcp.http_app()
+        # Get the Starlette ASGI app from FastMCP
+        http_app = mcp.streamable_http_app()
 
         # Run with uvicorn
         uvicorn.run(http_app, host=host, port=port)
