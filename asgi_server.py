@@ -6,6 +6,7 @@ This allows both synchronous Flask routes and asynchronous MCP SSE to coexist.
 import os
 import logging
 from a2wsgi import WSGIMiddleware
+from urllib.parse import parse_qs
 
 # Import the Flask app
 from web_server import app as flask_app, token_store, oauth_config
@@ -13,18 +14,12 @@ from web_server import app as flask_app, token_store, oauth_config
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Import FastAPI and MCP components
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse
+# Import MCP components
 from mcp.server.sse import SseServerTransport
 from mcp.server import Server
 import mcp.types as types
 from collections.abc import Sequence
 import json
-import asyncio
-
-# Create FastAPI app for MCP endpoint
-mcp_app = FastAPI()
 
 # Import query execution function
 from connect_api_dc_sql import run_query
@@ -32,26 +27,8 @@ from connect_api_dc_sql import run_query
 DEFAULT_LIST_TABLE_FILTER = os.getenv('DEFAULT_LIST_TABLE_FILTER', '%')
 
 
-@mcp_app.get("/mcp/sse")
-async def mcp_sse_endpoint(request: Request, token: str = None):
-    """
-    MCP Server-Sent Events endpoint for ChatGPT
-
-    Authentication via ?token=<auth_token> query parameter
-    """
-    # Check authentication
-    if not token or token not in token_store:
-        logger.error(f"MCP SSE - authentication failed for token: {token}")
-        return Response(
-            content='{"error": "Not authenticated", "message": "Please authenticate first. Get your token from /api/get_mcp_token after logging in."}',
-            status_code=401,
-            media_type="application/json"
-        )
-
-    user_id = token
-    logger.info(f"MCP SSE - authenticated via token: {user_id}")
-
-    # Create MCP server instance
+def create_mcp_server(user_id: str) -> Server:
+    """Create and configure an MCP server instance for a specific user"""
     server = Server("datacloud-mcp")
 
     # Register list_resources handler
@@ -162,17 +139,57 @@ async def mcp_sse_endpoint(request: Request, token: str = None):
             logger.error(f"Error executing tool {name}: {e}", exc_info=True)
             return [types.TextContent(type="text", text=f"Error: {str(e)}")]
 
-    # Create SSE transport and run MCP server
-    async with SseServerTransport("/messages") as (read_stream, write_stream):
+    return server
+
+
+async def handle_mcp_sse(scope, receive, send):
+    """Handle MCP SSE endpoint at the ASGI level"""
+    # Parse query string for token
+    query_string = scope.get("query_string", b"").decode("utf-8")
+    params = parse_qs(query_string)
+    token = params.get("token", [None])[0]
+
+    # Check authentication
+    if not token or token not in token_store:
+        logger.error(f"MCP SSE - authentication failed for token: {token}")
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [[b"content-type", b"application/json"]],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b'{"error": "Not authenticated", "message": "Please authenticate first. Get your token from /api/get_mcp_token after logging in."}',
+        })
+        return
+
+    user_id = token
+    logger.info(f"MCP SSE - authenticated via token: {user_id}")
+
+    # Create MCP server instance for this user
+    server = create_mcp_server(user_id)
+
+    # Create SSE transport - it IS an ASGI application
+    sse = SseServerTransport("/message", server)
+
+    try:
+        # Call the SSE transport as an ASGI app
+        await sse(scope, receive, send)
+    except Exception as e:
+        logger.error(f"MCP server error: {e}", exc_info=True)
+        # Try to send error response if possible
         try:
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options()
-            )
-        except Exception as e:
-            logger.error(f"MCP server error: {e}", exc_info=True)
-            raise
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [[b"content-type", b"text/plain"]],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": f"MCP Server Error: {str(e)}".encode(),
+            })
+        except:
+            pass
 
 
 # Convert Flask app to ASGI
@@ -182,14 +199,14 @@ flask_asgi_app = WSGIMiddleware(flask_app)
 async def application(scope, receive, send):
     """
     Combined ASGI application that routes:
-    - /mcp/sse -> FastAPI (async MCP SSE)
+    - /mcp/sse -> MCP SSE handler (async)
     - everything else -> Flask (OAuth, web interface, REST API)
     """
     path = scope.get("path", "")
 
     if path == "/mcp/sse":
-        # Route to FastAPI for MCP SSE
-        await mcp_app(scope, receive, send)
+        # Route to MCP SSE handler
+        await handle_mcp_sse(scope, receive, send)
     else:
         # Route to Flask for everything else
         await flask_asgi_app(scope, receive, send)
