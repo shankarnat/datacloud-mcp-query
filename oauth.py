@@ -37,23 +37,25 @@ class OAuthConfig:
             "SF_CALLBACK_URL", "http://localhost:55556/Callback")
 
         # Check for different auth methods
+        username = os.getenv("SF_USERNAME")
+        password = os.getenv("SF_PASSWORD")
         refresh_token = os.getenv("SF_REFRESH_TOKEN")
         jwt_private_key = os.getenv("SF_JWT_PRIVATE_KEY")
 
-        if not refresh_token and not jwt_private_key:
-            # If no refresh token or JWT key, require client credentials for browser-based flow
-            missing = [name for name, val in {
-                "SF_CLIENT_ID": client_id,
-                "SF_CLIENT_SECRET": client_secret,
-            }.items() if not val]
-            if missing:
-                print(
-                    f"Error: Missing required environment variables: {', '.join(missing)}")
-                print("Provide one of the following authentication methods:")
-                print("1. SF_CLIENT_ID + SF_CLIENT_SECRET (browser-based OAuth)")
-                print("2. SF_REFRESH_TOKEN (refresh token flow)")
-                print("3. SF_JWT_PRIVATE_KEY + SF_USERNAME (JWT bearer token flow)")
-                sys.exit(1)
+        # Check if any valid auth method is configured
+        has_username_password = username and password and client_id and client_secret
+        has_jwt = jwt_private_key and client_id
+        has_refresh_token = refresh_token and client_id and client_secret
+        has_browser_oauth = client_id and client_secret
+
+        if not (has_username_password or has_jwt or has_refresh_token or has_browser_oauth):
+            print("Error: No valid authentication method configured")
+            print("Provide one of the following authentication methods:")
+            print("1. SF_CLIENT_ID + SF_CLIENT_SECRET + SF_USERNAME + SF_PASSWORD (username-password flow)")
+            print("2. SF_CLIENT_ID + SF_JWT_PRIVATE_KEY + SF_USERNAME (JWT bearer token flow)")
+            print("3. SF_CLIENT_ID + SF_CLIENT_SECRET + SF_REFRESH_TOKEN (refresh token flow)")
+            print("4. SF_CLIENT_ID + SF_CLIENT_SECRET (browser-based OAuth - local only)")
+            sys.exit(1)
 
         return cls(client_id=client_id, client_secret=client_secret, login_root=login_root, redirect_uri=redirect_uri)
 
@@ -125,6 +127,45 @@ class OAuthSession:
         response.raise_for_status()
 
         logger.info("Successfully refreshed access token")
+        return response.json()
+
+    def _username_password_flow(self) -> dict:
+        """Use username-password flow for authentication"""
+        logger.info("Using username-password flow for authentication")
+
+        # Get environment variables
+        username = os.getenv("SF_USERNAME")
+        password = os.getenv("SF_PASSWORD")
+        security_token = os.getenv("SF_SECURITY_TOKEN", "")
+
+        if not username or not password:
+            raise ValueError("SF_USERNAME and SF_PASSWORD are required for username-password authentication")
+
+        # Salesforce requires password + security token concatenated
+        password_with_token = password + security_token
+
+        token_url = f"https://{self.config.login_root}/services/oauth2/token"
+
+        response = requests.post(
+            token_url,
+            {
+                "grant_type": "password",
+                "client_id": self.config.client_id,
+                "client_secret": self.config.client_secret,
+                "username": username,
+                "password": password_with_token,
+            },
+            headers={"Accept": "application/json"},
+        )
+
+        logger.info(f"Username-password auth response: status={response.status_code}")
+
+        if response.status_code >= 400:
+            logger.error(f"Username-password auth failed: {response.text}")
+
+        response.raise_for_status()
+
+        logger.info("Successfully obtained access token via username-password")
         return response.json()
 
     def _jwt_bearer_token_flow(self) -> dict:
@@ -263,16 +304,21 @@ class OAuthSession:
             self.token = None
 
         if self.token is None:
-            # Priority 1: JWT bearer token flow (best for Heroku/production)
-            jwt_private_key = os.getenv("SF_JWT_PRIVATE_KEY")
-            if jwt_private_key:
+            # Priority 1: Username-Password flow (simplest for Heroku)
+            username = os.getenv("SF_USERNAME")
+            password = os.getenv("SF_PASSWORD")
+            if username and password:
+                logger.info("Using username-password for authentication")
+                auth_info = self._username_password_flow()
+            # Priority 2: JWT bearer token flow
+            elif os.getenv("SF_JWT_PRIVATE_KEY"):
                 logger.info("Using JWT bearer token for authentication")
                 auth_info = self._jwt_bearer_token_flow()
-            # Priority 2: Refresh token flow
+            # Priority 3: Refresh token flow
             elif self.refresh_token:
                 logger.info("Using refresh token for authentication")
                 auth_info = self._refresh_access_token()
-            # Priority 3: Browser-based OAuth flow (for local development)
+            # Priority 4: Browser-based OAuth flow (for local development)
             else:
                 logger.info("Using browser-based OAuth flow")
                 auth_info = self._run_oauth_flow(
