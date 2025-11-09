@@ -36,10 +36,12 @@ class OAuthConfig:
         redirect_uri = os.getenv(
             "SF_CALLBACK_URL", "http://localhost:55556/Callback")
 
-        # Allow refresh token flow without client credentials for production environments
+        # Check for different auth methods
         refresh_token = os.getenv("SF_REFRESH_TOKEN")
-        if not refresh_token:
-            # If no refresh token, require client credentials for browser-based flow
+        jwt_private_key = os.getenv("SF_JWT_PRIVATE_KEY")
+
+        if not refresh_token and not jwt_private_key:
+            # If no refresh token or JWT key, require client credentials for browser-based flow
             missing = [name for name, val in {
                 "SF_CLIENT_ID": client_id,
                 "SF_CLIENT_SECRET": client_secret,
@@ -47,8 +49,10 @@ class OAuthConfig:
             if missing:
                 print(
                     f"Error: Missing required environment variables: {', '.join(missing)}")
-                print("Either provide SF_CLIENT_ID and SF_CLIENT_SECRET for browser-based OAuth,")
-                print("or provide SF_REFRESH_TOKEN for token-based authentication")
+                print("Provide one of the following authentication methods:")
+                print("1. SF_CLIENT_ID + SF_CLIENT_SECRET (browser-based OAuth)")
+                print("2. SF_REFRESH_TOKEN (refresh token flow)")
+                print("3. SF_JWT_PRIVATE_KEY + SF_USERNAME (JWT bearer token flow)")
                 sys.exit(1)
 
         return cls(client_id=client_id, client_secret=client_secret, login_root=login_root, redirect_uri=redirect_uri)
@@ -121,6 +125,60 @@ class OAuthSession:
         response.raise_for_status()
 
         logger.info("Successfully refreshed access token")
+        return response.json()
+
+    def _jwt_bearer_token_flow(self) -> dict:
+        """Use JWT bearer token flow for server-to-server authentication"""
+        import jwt
+
+        logger.info("Using JWT bearer token flow for authentication")
+
+        # Get environment variables
+        username = os.getenv("SF_USERNAME")
+        private_key = os.getenv("SF_JWT_PRIVATE_KEY")
+
+        if not username or not private_key:
+            raise ValueError("SF_USERNAME and SF_JWT_PRIVATE_KEY are required for JWT authentication")
+
+        # Decode private key if it's base64 encoded
+        try:
+            # Try to decode from base64 (for Heroku config vars)
+            private_key_decoded = base64.b64decode(private_key).decode('utf-8')
+        except Exception:
+            # If it fails, assume it's already plain text
+            private_key_decoded = private_key
+
+        # Create JWT payload
+        claim = {
+            "iss": self.config.client_id,
+            "sub": username,
+            "aud": f"https://{self.config.login_root}",
+            "exp": int(time.time()) + 300  # 5 minutes expiration
+        }
+
+        # Sign the JWT
+        assertion = jwt.encode(claim, private_key_decoded, algorithm="RS256")
+
+        # Exchange JWT for access token
+        token_url = f"https://{self.config.login_root}/services/oauth2/token"
+
+        response = requests.post(
+            token_url,
+            {
+                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                "assertion": assertion,
+            },
+            headers={"Accept": "application/json"},
+        )
+
+        logger.info(f"JWT token exchange response: status={response.status_code}")
+
+        if response.status_code >= 400:
+            logger.error(f"JWT token exchange failed: {response.text}")
+
+        response.raise_for_status()
+
+        logger.info("Successfully obtained access token via JWT")
         return response.json()
 
     def _run_oauth_flow(self, scopes: list[str]):
@@ -205,12 +263,17 @@ class OAuthSession:
             self.token = None
 
         if self.token is None:
-            # Check if we have a refresh token (for Heroku/production)
-            if self.refresh_token:
+            # Priority 1: JWT bearer token flow (best for Heroku/production)
+            jwt_private_key = os.getenv("SF_JWT_PRIVATE_KEY")
+            if jwt_private_key:
+                logger.info("Using JWT bearer token for authentication")
+                auth_info = self._jwt_bearer_token_flow()
+            # Priority 2: Refresh token flow
+            elif self.refresh_token:
                 logger.info("Using refresh token for authentication")
                 auth_info = self._refresh_access_token()
+            # Priority 3: Browser-based OAuth flow (for local development)
             else:
-                # Fall back to browser-based OAuth flow (for local development)
                 logger.info("Using browser-based OAuth flow")
                 auth_info = self._run_oauth_flow(
                     ["api", "cdp_query_api", "cdp_profile_api"])
